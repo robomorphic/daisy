@@ -658,6 +658,11 @@ object DataflowPhase extends DaisyPhase with RoundoffEvaluators with IntervalSub
     ctx.reporter.info("precond: " + precond)
     // print ranges
     ctx.reporter.info("resRange: " + resRange)
+
+    precisionMap.foreach({ case (id, prec) =>
+      writeToFile("precisions.txt", s"$id: $prec")  
+    })
+
     intermediateRanges.foreach({ case (expr, range) =>
       // if the expr is a let expression, print the last expression
       // case match
