@@ -17,6 +17,7 @@ object FinitePrecision {
     /* Public method that can be modified using mix-ins */
     def absRoundoff(i: Interval): Rational = {
       if (!range.includes(i)) {
+        print("Overflow range: " + range)
         throw OverflowException("Potential overflow detected. Error bound cannot be computed.")
       }
       _absRoundoff(i)
@@ -39,6 +40,8 @@ object FinitePrecision {
       case (Int32, FloatPrecision(_)) => -1 // todo does this ever happen
       case (Int32, Int32) => 0
       case (FixedPrecision(a), FixedPrecision(b)) => a - b
+      case (FixedFixedPrecision(a, b), FixedFixedPrecision(c, d)) =>
+        if (a == c && b == d) 0 else throw new Exception("comparing incompatible precisions")
         //if (a == b) 0 else throw new Exception("mixed-precision currently unsupported for fixed-points")
       case (FloatPrecision(_), FixedPrecision(_)) |
            (FixedPrecision(_), FloatPrecision(_)) => throw new Exception("comparing incompatible precisions")
@@ -193,6 +196,8 @@ object FinitePrecision {
    */
   case class FixedPrecision(bitlength: Int) extends Precision {
     import FixedPrecision._
+
+    val sqrtEpsilon = Rational(1L, 10L)
     override val toString = "Fixed" + bitlength
 
     override def _absRoundoff(i: Interval): Rational = Rational.powerTwo(-fractionalBits(i))
@@ -200,6 +205,39 @@ object FinitePrecision {
 
     def fractionalBits(i: Interval): Int = fractionalBits(Interval.maxAbs(i))
     def fractionalBits(r: Rational): Int = bitlength - integerBitsNeeded(r)
+
+    // Range is -2^(bitlength-1), 2^(bitlength-1) - 1
+    override val range: Interval =
+      Interval(-Rational.powerTwo(bitlength-1), Rational.powerTwo(bitlength-1) - Rational(1))
+
+    // TODO
+    override def canRepresent(r: Rational) = false
+  }
+
+    /*
+    Represents a fixed-point arithmetic precision.
+    Supports a signed format with truncation as the rounding mode.
+   */
+  case class FixedFixedPrecision(integerpart: Int, fractionalpart: Int) extends Precision {
+    import FixedPrecision._
+
+    val bitlength = integerpart + fractionalpart
+    val sqrtEpsilon = Rational(1L, 10L)
+    override val toString = "Fixed" + integerpart + "-" + fractionalpart
+
+    override def _absRoundoff(i: Interval): Rational = Rational.powerTwo(-fractionalBits(i))
+    override def _absTranscendentalRoundoff(i: Interval): Rational = Rational.two * _absRoundoff(i) // todo smarter computation // changed from: Rational.two *
+
+    def fractionalBits(i: Interval): Int = fractionalBits(Interval.maxAbs(i))
+    //def fractionalBits(r: Rational): Int = (bitlength) - integerBitsNeeded(r)
+    def fractionalBits(r: Rational): Int = {
+      if (integerBitsNeeded (r) > integerpart) {
+        // raise an exception
+        throw new Exception("Integer part of the number is too large for the given precision")
+      } else {
+        fractionalpart
+      }
+    }
 
     // Range is -2^(bitlength-1), 2^(bitlength-1) - 1
     override val range: Interval =

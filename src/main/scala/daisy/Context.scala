@@ -7,7 +7,7 @@ import scala.reflect.ClassTag
 import lang.Trees.{Expr, Program, FunDef}
 import lang.Identifiers._
 import tools.{DSAbstraction, FinitePrecision, Interval, PartialInterval, Rational}
-import FinitePrecision.{FixedPrecision, Precision}
+import FinitePrecision.{FixedFixedPrecision, FixedPrecision, FloatPrecision, Precision}
 import daisy.Main.ProgramLanguage
 import daisy.Main.ProgramLanguage._
 
@@ -88,7 +88,15 @@ case class Context(
 
   val fixedPoint: Boolean = option[Precision]("precision") match {
     case FixedPrecision(_) => true
+    case FixedFixedPrecision(_, _) => true
     case _ => option[String]("choosePrecision") == "fixed"
+  }
+
+  val uniformPrecision: Boolean = option[Precision]("precision") match {
+    case FixedPrecision(_) => false
+    case FixedFixedPrecision(_, _) => true
+    case FloatPrecision(_) => false // this should actually be true, but true for uniformPrecision should only affect fixed-point
+    case _ => throw new Exception("Uniform precision only supported for fixed-point")
   }
 
   def option[T: ClassTag](name: String): T = options.get(name) map {

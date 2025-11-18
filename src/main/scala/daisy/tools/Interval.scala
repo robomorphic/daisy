@@ -5,6 +5,12 @@ package tools
 
 import Rational._
 
+import java.util.{Arrays}
+
+import com.sun.jna.Library;
+import com.sun.jna.Native;
+import com.sun.jna.Structure;
+
 object Interval {
 
   def maxAbs(i: Interval): Rational = max(abs(i.xlo), abs(i.xhi))
@@ -42,12 +48,18 @@ object Interval {
   } // TODO rounding outwards correct? (should it be inwards?)
 }
 
+trait foo extends Library {
+  def _Z15ifelsefunclowerffff(xlo: Float, xhi: Float, ylo: Float, yhi: Float): Float
+  def _Z15ifelsefuncupperffff(xlo: Float, xhi: Float, ylo: Float, yhi: Float): Float
+}
+
 case class PartialInterval(xlo: Option[Rational], xhi: Option[Rational])
 
 case class Interval(xlo: Rational, xhi: Rational) extends RangeArithmetic[Interval] {
   assert(xlo <= xhi, "interval lower bound cannot be bigger than upper bound")
 
   import Interval.pi
+  val epsilon = Rational.fromString("0.001")
 
   // private val zero = Rational(0.0)
 
@@ -79,12 +91,16 @@ case class Interval(xlo: Rational, xhi: Rational) extends RangeArithmetic[Interv
     Interval(xlo - other.xhi, xhi - other.xlo)
   }
 
+  def makePositive: Interval = {
+    val xlo = if (this.xlo < zero) zero else this.xlo
+    val xhi = if (this.xhi < zero) zero else this.xhi
+    Interval(xlo, xhi)
+  }
+
   def *(y: Interval): Interval = y match {
     case Interval(ylo, yhi) =>
       // TODO: test via unit test that this works and that we need this
-      if (xlo == zero && xhi == zero) {
-        Interval(zero, zero)
-      } else if (xlo >= zero) {
+      if (xlo >= zero) {
         if (ylo >= zero) {
           Interval(xlo * ylo, xhi * yhi)
         } else if (yhi <= zero) {
@@ -93,16 +109,7 @@ case class Interval(xlo: Rational, xhi: Rational) extends RangeArithmetic[Interv
           Interval(xhi * ylo, xhi * yhi)
         }
       }
-      else if (xhi <= zero) {
-        if (ylo >= zero) {
-          Interval(xlo * yhi, xhi * ylo)
-        } else if (yhi <= zero) {
-          Interval(xhi * yhi, xlo * ylo)
-        } else {
-          Interval(xlo * yhi, xlo * ylo)
-        }
-      }
-      else {
+      else if (xhi > zero) {
         if (ylo >= zero) {
           Interval(xlo * yhi, xhi * yhi)
         } else if (yhi <= zero) {
@@ -113,7 +120,17 @@ case class Interval(xlo: Rational, xhi: Rational) extends RangeArithmetic[Interv
           Interval(a, b)
         }
       }
+      else {
+        if (ylo >= zero) {
+          Interval(xlo * yhi, xhi * ylo)
+        } else if (yhi <= zero) {
+          Interval(xhi * yhi, xlo * ylo)
+        } else {
+          Interval(xlo * yhi, xlo * ylo)
+        }
+      }
   }
+  
 
   // the lazy version
   def *(r: Rational): Interval = this * Interval(r, r)

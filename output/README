@@ -1,3 +1,0 @@
-This directory will contain generated scala code from daisy.
-Filenames will be the same as your input files.
-Files are generated with the "--printToFile" flag.

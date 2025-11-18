@@ -50,6 +50,12 @@ object CodeGenerationPhase extends DaisyPhase {
     val mixedTuning = ctx.hasFlag("mixed-tuning") || (ctx.hasFlag("approx") && ctx.hasFlag("polyMixed"))
     val fixedPrecision = ctx.fixedPoint
     val apfixedFormat = ctx.hasFlag("apfixed")
+    val uniformPrecision = ctx.uniformPrecision
+    val (uniform_intbit, uniform_fracbit) = ctx.option[Precision]("precision") match {
+      case FixedPrecision(a) => (-1, -1)
+      case FixedFixedPrecision(a, b) => (a, b)
+      case FloatPrecision(a) => (-1, -1)
+    }
 
     val ctxCopy = if (ctx.hasFlag("approx")) ctx.copy(options = ctx.options + ("approx" -> false)) else ctx
     val newDefs = transformConsideredFunctions(ctxCopy, prg){ fnc =>
@@ -125,6 +131,27 @@ object CodeGenerationPhase extends DaisyPhase {
         // types are changed before, since the semantics of type assignments is special
         fnc
 
+      } else if (fixedPrecision && apfixedFormat && uniformPrecision){
+        val b = uniform_intbit + uniform_fracbit
+        val newBody = toAPFixedUniformCode(_body, uniform_fracbit, uniform_intbit, ctx.intermediateRanges(fnc.id),
+          ctx.intermediateAbsErrors(fnc.id))
+        val fncParams = fnc.params.map({
+          case ValDef(id) =>
+            val actualRange = ctx.intermediateRanges(fnc.id)(Variable(id), emptyPath) +/- ctx.intermediateAbsErrors(fnc.id)(Variable(id), emptyPath)
+            val intBits = uniform_intbit
+            ValDef(id.changeType(APFixedType(uniform_intbit + uniform_fracbit, uniform_intbit)))
+        })
+        val actualRangeResult = ctx.resultRealRanges(fnc.id) +/- ctx.resultAbsoluteErrors(fnc.id)
+        val intBitsResult = uniform_intbit
+
+        // TODO: C code with tuples???
+        val retType = APFixedType(b, intBitsResult)
+
+        fnc.copy(
+          params = fncParams,
+          body = Some(newBody),
+          returnType = retType)
+
       } else if (fixedPrecision && apfixedFormat){
         val b = (uniformPrecisions(fnc.id): @unchecked) match { case FixedPrecision(b) => b}
         val newBody = toAPFixedCode(_body, b, ctx.intermediateRanges(fnc.id),
@@ -145,7 +172,28 @@ object CodeGenerationPhase extends DaisyPhase {
           params = fncParams,
           body = Some(newBody),
           returnType = retType)
+      } else if (fixedPrecision && uniformPrecision) {
+        assert(!ctx.option[Option[String]]("mixed-precision").isDefined,
+          "Mixed-precision codegen is not supported for fixed-points.")
 
+        val b = uniform_intbit + uniform_fracbit
+        val newBody = toFixedPointUniformCode(_body, FixedFixedPrecision(uniform_intbit, uniform_fracbit), uniform_fracbit,
+          ctx.intermediateRanges(fnc.id), ctx.intermediateAbsErrors(fnc.id))
+        val valDefType = b match {
+           // cast precisions between 8, 16 and 32
+          case x if x <= 8 => Int16Type
+          case x if 8 < x && x <= 16 => Int32Type
+          case x if 16 < x && x <= 32 => Int64Type
+          case x if 32 < x => Int64Type
+        }
+        val newReturnType = fnc.returnType match {
+          case TupleType(args) => TupleType(args.map(x => valDefType))
+          case _ => valDefType
+        }
+
+        fnc.copy(params = fnc.params.map(vd => ValDef(vd.id.changeType(valDefType))),
+          body = Some(newBody),
+          returnType = newReturnType)
       } else if (fixedPrecision) {
         assert(!ctx.option[Option[String]]("mixed-precision").isDefined,
           "Mixed-precision codegen is not supported for fixed-points.")
@@ -158,6 +206,7 @@ object CodeGenerationPhase extends DaisyPhase {
           case x if x <= 8 => Int16Type
           case x if 8 < x && x <= 16 => Int32Type
           case x if 16 < x && x <= 32 => Int64Type
+          case x if 32 < x => Int64Type
         }
         val newReturnType = fnc.returnType match {
           case TupleType(args) => TupleType(args.map(x => valDefType))
@@ -613,10 +662,10 @@ object CodeGenerationPhase extends DaisyPhase {
   def toFixedPointCode(expr: Expr, format: FixedPrecision, intermRanges: Map[(Expr, PathCond), Interval],
     intermAbsErrors: Map[(Expr, PathCond), Rational]): Expr = {
     val newType = format match {
-      case FixedPrecision(x) if x <= 8 => Int16Type
-      case FixedPrecision(x) if 8 < x && x <= 16 => Int32Type
-      case FixedPrecision(x) if 16 < x && x <= 32 => Int64Type
-      //case FixedPrecision(x) if x > 32 => Long // todo ???
+      case FixedPrecision(x) if x <= 8 => Int16Type // TODO: Add Int8Type
+      case FixedPrecision(x) if 8 < x && x <= 16 => Int16Type
+      case FixedPrecision(x) if 16 < x && x <= 32 => Int32Type
+      case FixedPrecision(x) if 32 < x && x <= 64 => Int64Type
     }
 
     @inline
@@ -630,12 +679,21 @@ object CodeGenerationPhase extends DaisyPhase {
     def _toFPCode(e: Expr, path: PathCond): Expr = (e: @unchecked) match {
       case x @ Variable(id) => Variable(id.changeType(newType))
 
+      case x @ Sin(t) =>
+        // A placeholder so I know to change it
+        IntPow(Variable(FreshIdentifier("sin", newType)), 1)
+
+      case x @ Cos(t) =>
+        // A placeholder so I know to change it
+        IntPow(Variable(FreshIdentifier("cos", newType)), 1)
+
       case RealLiteral(r) => // TODO: translate constant
         val f = format.fractionalBits(r)
         format match {
-          case FixedPrecision(x) if x <= 8 => Int16Literal((r * Rational.fromDouble(math.pow(2, f))).roundToInt)
-          case FixedPrecision(x) if 8 < x && x <= 16 => Int32Literal((r * Rational.fromDouble(math.pow(2, f))).roundToInt)
-          case FixedPrecision(x) if 16 < x && x <= 32 => Int64Literal((r * Rational.fromDouble(math.pow(2, f))).roundToLong)
+          case FixedPrecision(x) if x <= 8 => Int16Literal((r * Rational.fromDouble(math.pow(2, f))).roundToInt) // TODO: Add Int8Literal. Since this line is not used for now, it does not affect anything
+          case FixedPrecision(x) if 8 < x && x <= 16 => Int16Literal((r * Rational.fromDouble(math.pow(2, f))).roundToInt)
+          case FixedPrecision(x) if 16 < x && x <= 32 => Int32Literal((r * Rational.fromDouble(math.pow(2, f))).roundToInt)
+          case FixedPrecision(x) if 32 < x && x <= 64 => Int64Literal((r * Rational.fromDouble(math.pow(2, f))).roundToInt)
         }
 
       case UMinus(t) => UMinus(_toFPCode(t, path))
@@ -646,86 +704,104 @@ object CodeGenerationPhase extends DaisyPhase {
       case x @ Plus(lhs, rhs) =>
         val fLhs = getFractionalBits(lhs, path)
         val fRhs = getFractionalBits(rhs, path)
-
+        
         // determine how much to shift left or right
         val fAligned = math.max(fLhs, fRhs)
-        val newLhs =
-          if (fLhs < fAligned) {
-            LeftShift(_toFPCode(lhs, path), (fAligned - fLhs))
-          } else {
-            _toFPCode(lhs, path)
-          }
-        val newRhs =
-          if (fRhs < fAligned) {
-            LeftShift(_toFPCode(rhs, path), (fAligned - fRhs))
-          } else {
-            _toFPCode(rhs, path)
-          }
-
-        // fractional bits result
-        val fRes = getFractionalBits(x, path)
-        // shift result
-        if (fAligned == fRes) {
-          Plus(newLhs, newRhs)
-        } else if (fRes < fAligned) {
-          RightShift(Plus(newLhs, newRhs), (fAligned - fRes))
-        } else { // (fAligned < fRes) {
-          // TODO: this sounds funny. does this ever happen?
-          //reporter.warning("funny shifting condition is happening")
-          LeftShift(Plus(newLhs, newRhs), (fRes - fAligned))
-
+        var curr_fp_point = math.min(fLhs, fRhs)
+        val (newLhs, newRhs) = if(fLhs < fAligned) {
+          (_toFPCode(lhs, path), RightShift(_toFPCode(rhs, path), (fAligned - fLhs)))
         }
+        else if(fRhs < fAligned) {
+          (RightShift(_toFPCode(lhs, path), (fAligned - fRhs)), _toFPCode(rhs, path))
+        }
+        else {
+          (_toFPCode(lhs, path), _toFPCode(rhs, path))
+        }
+
+        val fRes = getFractionalBits(x, path)
+        //if(curr_fp_point < fRes) {
+        //  RightShift(Plus(newLhs, newRhs), (fRes - curr_fp_point))
+        //}
+        //else if(curr_fp_point > fRes) {
+        //  RightShift(Plus(newLhs, newRhs), (curr_fp_point - fRes))
+        //}
+        if(curr_fp_point < fRes) {
+          Plus(RightShift(newLhs, (fRes - curr_fp_point)), RightShift(newRhs, (fRes - curr_fp_point)))
+        }
+        else if(curr_fp_point > fRes) {
+          Plus(RightShift(newLhs, (curr_fp_point - fRes)), RightShift(newRhs, (curr_fp_point - fRes)))
+        }
+        else {
+          Plus(newLhs, newRhs)
+        }
+        
+        
 
       case x @ Minus(lhs, rhs) =>
-        // fractional bits from lhs
         val fLhs = getFractionalBits(lhs, path)
         val fRhs = getFractionalBits(rhs, path)
-
+        
         // determine how much to shift left or right
+        
         val fAligned = math.max(fLhs, fRhs)
-        val newLhs =
-          if (fLhs < fAligned) {
-            LeftShift(_toFPCode(lhs, path), (fAligned - fLhs))
-          } else {
-            _toFPCode(lhs, path)
-          }
-        val newRhs =
-          if (fRhs < fAligned) {
-            LeftShift(_toFPCode(rhs, path), (fAligned - fRhs))
-          } else {
-            _toFPCode(rhs, path)
-          }
-
-        // fractional bits result
-        val fRes = getFractionalBits(x, path)
-        // shift result
-        if (fAligned == fRes) {
-          Minus(newLhs, newRhs)
-        } else if (fRes < fAligned) {
-          RightShift(Minus(newLhs, newRhs), (fAligned - fRes))
-        } else { // (fAligned < fRes) {
-          // TODO: this sounds funny. does this ever happen?
-          //reporter.warning("funny shifting condition is happening")
-          LeftShift(Minus(newLhs, newRhs), (fRes - fAligned))
+        var curr_fp_point = math.min(fLhs, fRhs)
+        val (newLhs, newRhs) = if(fLhs < fAligned) {
+          (_toFPCode(lhs, path), RightShift(_toFPCode(rhs, path), (fAligned - fLhs)))
         }
+        else if(fRhs < fAligned) {
+          (RightShift(_toFPCode(lhs, path), (fAligned - fRhs)), _toFPCode(rhs, path))
+        }
+        else {
+          (_toFPCode(lhs, path), _toFPCode(rhs, path))
+        }
+
+        val fRes = getFractionalBits(x, path)
+        if(curr_fp_point < fRes) {
+          Minus(RightShift(newLhs, (fRes - curr_fp_point)), RightShift(newRhs, (fRes - curr_fp_point)))
+        }
+        else if(curr_fp_point > fRes) {
+          Minus(RightShift(newLhs, (curr_fp_point - fRes)), RightShift(newRhs, (curr_fp_point - fRes)))
+        }
+        else {
+          Minus(newLhs, newRhs)
+        }
+
+        
 
       case x @ Times(lhs, rhs) =>
+        // 1) Convert to FP code (so they have the correct “fixed-point bits” in them)
+        val lhsCode = _toFPCode(lhs, path)
+        val rhsCode = _toFPCode(rhs, path)
 
-        val mult = Times(_toFPCode(lhs, path), _toFPCode(rhs, path))
-        val fMult = getFractionalBits(lhs, path) + getFractionalBits(rhs, path)
-
-        // fractional bits result
+        // 2) Figure out how many fractional bits each side has, and how many we want in the result
+        val fLhs = getFractionalBits(lhs, path)
+        val fRhs = getFractionalBits(rhs, path)
         val fRes = getFractionalBits(x, path)
-        // shift result
-        if (fMult == fRes) {
-          mult
-        } else if (fRes < fMult) {
-          RightShift(mult, (fMult - fRes))
-        } else { // (fAligned < fRes) {
-          // TODO: this sounds funny. does this ever happen?
-          //reporter.warning("funny shifting condition is happening")
-          LeftShift(mult, (fRes - fMult))
-        }
+
+        // 3) Cast to 64-bit type so we have enough room for the product
+        val lhs64 = Cast(lhsCode, Int64Type)
+        val rhs64 = Cast(rhsCode, Int64Type)
+
+        // 4) Multiply in 64-bit
+        val product = Times(lhs64, rhs64)
+
+        // 5) Shift by (fLhs + fRhs - fRes)
+        val totalFraction = fLhs + fRhs
+        val shiftAmount   = totalFraction - fRes
+
+        val shifted =
+          if (shiftAmount > 0) {
+            RightShift(product, shiftAmount) // possibly arithmetic shift if signed
+          } else if (shiftAmount < 0) {
+            LeftShift(product, -shiftAmount)
+          } else {
+            product
+          }
+
+        // 6) Cast back to the final fixed-point type
+        Cast(shifted, newType)
+
+
 
       case x @ Division(lhs, rhs) =>
         val fLhs = getFractionalBits(lhs, path)
@@ -733,7 +809,166 @@ object CodeGenerationPhase extends DaisyPhase {
 
         val fRes = getFractionalBits(x, path)
         val shift = fRes + fRhs - fLhs
-        Division(LeftShift(_toFPCode(lhs, path), shift), _toFPCode(rhs, path))
+        Division(LeftShift(Cast(_toFPCode(lhs, path), Int64Type), shift), _toFPCode(rhs, path))
+
+      case Let(id, value, body) =>
+        Let(id.changeType(newType), _toFPCode(value, path), _toFPCode(body, path))
+
+      case x @ IfExpr(cond, thenn, elze) =>
+        IfExpr(_toFPCode(cond, path), _toFPCode(thenn, path :+ cond),
+          _toFPCode(elze, path :+ lang.TreeOps.negate(cond)))
+
+      case Tuple(args) => Tuple(args.map(_toFPCode(_, path)))
+
+      case GreaterThan(l, r) => GreaterThan(_toFPCode(l, path), _toFPCode(r, path))
+      case GreaterEquals(l, r) => GreaterEquals(_toFPCode(l, path), _toFPCode(r, path))
+      case LessThan(l, r) => LessThan(_toFPCode(l, path), _toFPCode(r, path))
+      case LessEquals(l, r) => LessEquals(_toFPCode(l, path), _toFPCode(r, path))
+
+      case ApproxPoly(original, arg, approxFncId, errBudget) => ApproxPoly(original, arg, approxFncId.changeType(newType), errBudget)
+    }
+
+    _toFPCode(expr, emptyPath)
+  }
+
+  def toFixedPointUniformCode(expr: Expr, format: FixedFixedPrecision, uniform_fracbit: Int, intermRanges: Map[(Expr, PathCond), Interval],
+    intermAbsErrors: Map[(Expr, PathCond), Rational]): Expr = {
+    val newType = format match {
+      case FixedFixedPrecision(x, y) if x + y <= 8 => Int16Type // TODO: Add Int8Type
+      case FixedFixedPrecision(x, y) if 8 < x + y && x + y <= 16 => Int16Type
+      case FixedFixedPrecision(x, y) if 16 < x + y && x + y <= 32 => Int32Type
+      case FixedFixedPrecision(x, y) if 32 < x + y && x + y <= 64 => Int64Type
+    }
+
+    def _toFPCode(e: Expr, path: PathCond): Expr = (e: @unchecked) match {
+      case x @ Variable(id) => Variable(id.changeType(newType))
+
+      case x @ Sin(t) =>
+        // A placeholder so I know to change it
+        IntPow(Variable(FreshIdentifier("sin", newType)), 1)
+
+      case x @ Cos(t) =>
+        // A placeholder so I know to change it
+        IntPow(Variable(FreshIdentifier("cos", newType)), 1)
+
+      case RealLiteral(r) => // TODO: translate constant
+        val f = format.fractionalBits(r)
+        format match {
+          case FixedFixedPrecision(x, y) if x + y <= 8 => Int16Literal((r * Rational.fromDouble(math.pow(2, f))).roundToInt) // TODO: Add Int8Literal. Since this line is not used for now, it does not affect anything
+          case FixedFixedPrecision(x, y) if 8 < x + y && x + y <= 16 => Int16Literal((r * Rational.fromDouble(math.pow(2, f))).roundToInt)
+          case FixedFixedPrecision(x, y) if 16 < x + y && x + y <= 32 => Int32Literal((r * Rational.fromDouble(math.pow(2, f))).roundToInt)
+          case FixedFixedPrecision(x, y) if 32 < x + y && x + y <= 64 => Int64Literal((r * Rational.fromDouble(math.pow(2, f))).roundToInt)
+        }
+
+      case UMinus(t) => UMinus(_toFPCode(t, path))
+
+      case Sqrt(t) =>
+        throw new Exception("Sqrt is not supported for fixed-points!")
+
+      case x @ Plus(lhs, rhs) =>
+        val fLhs = uniform_fracbit
+        val fRhs = uniform_fracbit
+
+        // determine how much to shift left or right
+        val fAligned = math.max(fLhs, fRhs)
+        var curr_fp_point = math.min(fLhs, fRhs)
+        val (newLhs, newRhs) = if(fLhs < fAligned) {
+          (_toFPCode(lhs, path), RightShift(_toFPCode(rhs, path), (fAligned - fLhs)))
+        }
+        else if(fRhs < fAligned) {
+          (RightShift(_toFPCode(lhs, path), (fAligned - fRhs)), _toFPCode(rhs, path))
+        }
+        else {
+          (_toFPCode(lhs, path), _toFPCode(rhs, path))
+        }
+
+        val fRes = uniform_fracbit
+
+        if(curr_fp_point < fRes) {
+          Plus(RightShift(newLhs, (fRes - curr_fp_point)), RightShift(newRhs, (fRes - curr_fp_point)))
+        }
+        else if(curr_fp_point > fRes) {
+          Plus(RightShift(newLhs, (curr_fp_point - fRes)), RightShift(newRhs, (curr_fp_point - fRes)))
+        }
+        else {
+          Plus(newLhs, newRhs)
+        }
+        
+        
+
+      case x @ Minus(lhs, rhs) =>
+        val fLhs = uniform_fracbit
+        val fRhs = uniform_fracbit
+        
+        // determine how much to shift left or right
+        
+        val fAligned = math.max(fLhs, fRhs)
+        var curr_fp_point = math.min(fLhs, fRhs)
+        val (newLhs, newRhs) = if(fLhs < fAligned) {
+          (_toFPCode(lhs, path), RightShift(_toFPCode(rhs, path), (fAligned - fLhs)))
+        }
+        else if(fRhs < fAligned) {
+          (RightShift(_toFPCode(lhs, path), (fAligned - fRhs)), _toFPCode(rhs, path))
+        }
+        else {
+          (_toFPCode(lhs, path), _toFPCode(rhs, path))
+        }
+
+        val fRes = uniform_fracbit
+        if(curr_fp_point < fRes) {
+          Minus(RightShift(newLhs, (fRes - curr_fp_point)), RightShift(newRhs, (fRes - curr_fp_point)))
+        }
+        else if(curr_fp_point > fRes) {
+          Minus(RightShift(newLhs, (curr_fp_point - fRes)), RightShift(newRhs, (curr_fp_point - fRes)))
+        }
+        else {
+          Minus(newLhs, newRhs)
+        }
+
+        
+
+      case x @ Times(lhs, rhs) =>
+        // 1) Convert to FP code (so they have the correct “fixed-point bits” in them)
+        val lhsCode = _toFPCode(lhs, path)
+        val rhsCode = _toFPCode(rhs, path)
+
+        // 2) Figure out how many fractional bits each side has, and how many we want in the result
+        val fLhs = uniform_fracbit
+        val fRhs = uniform_fracbit
+        val fRes = uniform_fracbit
+
+        // 3) Cast to 64-bit type so we have enough room for the product
+        val lhs64 = Cast(lhsCode, Int64Type)
+        val rhs64 = Cast(rhsCode, Int64Type)
+
+        // 4) Multiply in 64-bit
+        val product = Times(lhs64, rhs64)
+
+        // 5) Shift by (fLhs + fRhs - fRes)
+        val totalFraction = fLhs + fRhs
+        val shiftAmount   = totalFraction - fRes
+
+        val shifted =
+          if (shiftAmount > 0) {
+            RightShift(product, shiftAmount) // possibly arithmetic shift if signed
+          } else if (shiftAmount < 0) {
+            LeftShift(product, -shiftAmount)
+          } else {
+            product
+          }
+
+        // 6) Cast back to the final fixed-point type
+        Cast(shifted, newType)
+
+
+
+      case x @ Division(lhs, rhs) =>
+        val fLhs = uniform_fracbit
+        val fRhs = uniform_fracbit
+
+        val fRes = uniform_fracbit
+        val shift = fRes + fRhs - fLhs
+        Division(LeftShift(Cast(_toFPCode(lhs, path), Int64Type), shift), _toFPCode(rhs, path))
 
       case Let(id, value, body) =>
         Let(id.changeType(newType), _toFPCode(value, path), _toFPCode(body, path))
@@ -826,6 +1061,56 @@ object CodeGenerationPhase extends DaisyPhase {
 
       case x @ ApproxPoly(original, arg, approxFncId, errBudget) =>
         val funType = APFixedType(totalBits, getIntegerBits(x, path))
+        ApproxPoly(original, arg, approxFncId.changeType(funType), errBudget)
+
+    }
+    _toFPCode(expr, emptyPath)
+  }
+
+  /*
+   * Generates code for the Vivado HLS hardware synthesis tool with the ap_fixed data type.
+   * Expects code to be already in SSA form.
+   */
+  def toAPFixedUniformCode(expr: Expr, fracBits: Int, intBits: Int, intermRanges: Map[(Expr, PathCond), Interval],
+    intermAbsErrors: Map[(Expr, PathCond), Rational]): Expr = {
+    val totalBits = fracBits + intBits
+    
+    def _toFPCode(e: Expr, path: PathCond): Expr = (e: @unchecked) match {
+      case x @ Variable(id) => x
+
+      case x @ RealLiteral(r) => x  // constants are handled automatically?
+
+      case x @ FinitePrecisionLiteral(r,prec,s)  => x
+
+      case x @ Cast(ex,typ) =>
+        throw new Exception("Cast is not supported for ap_fixed with uniform precision!")
+        
+
+      case x @ ArithOperator(Seq(t: Expr), recons) =>
+        recons(Seq(_toFPCode(t, path)))
+
+      case x @ ArithOperator(Seq(lhs: Expr, rhs: Expr), recons) =>
+        val rhsFP = _toFPCode(rhs, path)
+        val lhsFP = _toFPCode(lhs, path)
+        recons(Seq(lhsFP, rhsFP))
+
+      case Let(id, value, body) =>
+
+        val idType = APFixedType(totalBits, intBits)
+        Let(id.changeType(idType), _toFPCode(value, path),
+          _toFPCode(body, path))
+
+      case x @ IfExpr(cond, thenn, elze) =>
+        IfExpr(_toFPCode(cond, path), _toFPCode(thenn, path :+ cond),
+               _toFPCode(elze, path :+ lang.TreeOps.negate(cond)))
+
+      case x @ GreaterThan(l, r) => GreaterThan(_toFPCode(l, path), _toFPCode(r, path))
+      case x @ GreaterEquals(l, r) => GreaterEquals(_toFPCode(l, path), _toFPCode(r, path))
+      case x @ LessThan(l, r) => LessThan(_toFPCode(l, path), _toFPCode(r, path))
+      case x @ LessEquals(l, r) => LessEquals(_toFPCode(l, path), _toFPCode(r, path))
+
+      case x @ ApproxPoly(original, arg, approxFncId, errBudget) =>
+        val funType = APFixedType(totalBits, intBits)
         ApproxPoly(original, arg, approxFncId.changeType(funType), errBudget)
 
     }

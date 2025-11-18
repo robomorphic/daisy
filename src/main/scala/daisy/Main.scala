@@ -60,7 +60,11 @@ object Main {
       "precision",
       Map("Float16" -> Float16, "Float32" -> Float32, "Float64" -> Float64,
         "Quad" -> DoubleDouble, "QuadDouble" -> QuadDouble) ++
-        (1 to 64).map(x => ("Fixed" + x -> FixedPrecision(x))),
+        (1 to 300).map(x => ("Fixed" + x -> FixedPrecision(x))) ++
+        (for {
+          x <- 1 to 64
+          y <- 1 to 64
+          } yield ("Fixed" + x + "-" + y -> FixedFixedPrecision(x, y))).toMap,
       "Float64",
       "(Default, uniform) precision to use"),
     StringChoiceOption(
@@ -167,9 +171,9 @@ object Main {
         ctx.timers.total.start()
         val pipeline = computePipeline(ctx)
         ctx.reporter.info("\n************ Starting Daisy ************")
-        try { // for debugging it's better to have these off.
+        ///////try { // for debugging it's better to have these off.
           pipeline.run(ctx, Program(null, Nil))
-        } catch {
+        ///////} catch {
           //case tools.DivisionByZeroException(msg) =>
           //  ctx.reporter.warning(msg)
           //case tools.DenormalRangeException(msg) =>
@@ -184,21 +188,21 @@ object Main {
           //  ctx.reporter.warning(msg)
           // case e: DaisyFatalError =>
           //   ctx.reporter.info(f"Something really bad happened. Cannot continue.")
-          case e: Exception =>
-            val msg = f"${e.getClass.getSimpleName}: ${e.getMessage}"
-            ctx.reporter.info(f"Something really bad happened. Cannot continue: $msg")
-            if ((ctx.options.contains("ds") || ctx.options.contains("ds-naive")) && ctx.options.contains("results-csv")) {
-              val (_,prg) = frontend.ExtractionPhase.runPhase(ctx, ctx.originalProgram)
-              backend.InfoPhase.runPhase(ctx.copy(errMsg = Some(msg)), prg)
-            }
-          case t : Throwable =>
-            val msg = f"${t.getClass.getSimpleName}: ${t.getMessage}"
-            ctx.reporter.info(f"Something really bad happened. Cannot continue: $msg")
-            if ((ctx.options.contains("ds") || ctx.options.contains("ds-naive")) && ctx.options.contains("results-csv")) {
-              val (_,prg) = frontend.ExtractionPhase.runPhase(ctx, ctx.originalProgram)
-              backend.InfoPhase.runPhase(ctx.copy(errMsg = Some(msg)), prg)
-            }
-        }
+          ////////case e: Exception =>
+          ////////  val msg = f"${e.getClass.getSimpleName}: ${e.getMessage}"
+          ////////  ctx.reporter.info(f"Something really bad happened. Cannot continue: $msg")
+          ////////  if ((ctx.options.contains("ds") || ctx.options.contains("ds-naive")) && ctx.options.contains("results-csv")) {
+          ////////    val (_,prg) = frontend.ExtractionPhase.runPhase(ctx, ctx.originalProgram)
+          ////////    backend.InfoPhase.runPhase(ctx.copy(errMsg = Some(msg)), prg)
+          ////////  }
+          ////////case t : Throwable =>
+          ////////  val msg = f"${t.getClass.getSimpleName}: ${t.getMessage}"
+          ////////  ctx.reporter.info(f"Something really bad happened. Cannot continue: $msg")
+          ////////  if ((ctx.options.contains("ds") || ctx.options.contains("ds-naive")) && ctx.options.contains("results-csv")) {
+          ////////    val (_,prg) = frontend.ExtractionPhase.runPhase(ctx, ctx.originalProgram)
+          ////////    backend.InfoPhase.runPhase(ctx.copy(errMsg = Some(msg)), prg)
+          ////////  }
+        ///////}
         ctx.timers.get("total").stop()
         ctx.reporter.info("time: \n" + ctx.timers.toString)
         Option(ctx)
